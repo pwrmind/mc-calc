@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Monte Carlo · Unit‑Profit Simulator</title>
+    <!-- Font Awesome (иконки) -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <!-- Tailwind (стили) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Alpine.js (реактивность) -->
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <!-- TensorFlow.js (вычисления) -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+    <!-- expr-eval (парсер формул) -->
+    <script src="https://cdn.jsdelivr.net/npm/expr-eval@2.0.2/dist/bundle.min.js"></script>
+    <!-- Chart.js (визуализация) -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js"></script>
+</head>
+<body class="bg-slate-50 font-sans text-slate-800 antialiased">
+
+<div x-data="monteCarloEngine()" class="max-w-6xl mx-auto p-4 md:p-6 lg:p-8">
+    <!-- Заголовок -->
+    <header class="mb-8 md:mb-10 text-center">
+        <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">
+            <span class="bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent">Unit</span> 
+            <span class="text-slate-800">Profit Simulator</span>
+        </h1>
+        <p class="text-slate-500 mt-2 text-sm md:text-base">Метод Монте‑Карло · TensorFlow.js · 100 000 итераций</p>
+    </header>
+
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 lg:gap-8">
+        <!-- Левая колонка: переменные -->
+        <div class="lg:col-span-4 space-y-5">
+            <div class="bg-white/90 backdrop-blur-sm p-5 md:p-6 rounded-2xl shadow-md border border-slate-200/80">
+                <div class="flex justify-between items-center mb-5">
+                    <h2 class="text-lg font-bold flex items-center gap-2">
+                        <i class="fa-solid fa-cubes text-indigo-500"></i> Переменные
+                    </h2>
+                    <button @click="addVariable()" 
+                            class="text-xs bg-indigo-50 text-indigo-700 px-3 py-1.5 rounded-full hover:bg-indigo-100 transition-all shadow-sm">
+                        <i class="fa-solid fa-plus mr-1"></i> Добавить
+                    </button>
+                </div>
+                
+                <div class="space-y-3 max-h-[460px] overflow-y-auto pr-1 custom-scroll">
+                    <template x-for="(v, index) in variables" :key="index">
+                        <div class="p-4 bg-slate-50 rounded-xl border border-slate-200/80 group relative shadow-sm">
+                            <button @click="removeVariable(index)" 
+                                    class="absolute top-2 right-2 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all"
+                                    title="Удалить переменную">
+                                <i class="fa-solid fa-trash-can text-xs"></i>
+                            </button>
+                            
+                            <div class="flex items-center gap-2 mb-3">
+                                <input type="text" x-model="v.name" 
+                                       class="w-1/2 font-mono text-sm font-bold bg-white border border-slate-200 rounded-lg px-3 py-1.5 focus:ring-2 focus:ring-indigo-300 outline-none">
+                                <select x-model="v.type" 
+                                        class="w-1/2 text-xs bg-white border border-slate-200 rounded-lg px-2 py-1.5">
+                                    <option value="uniform">Равномерное</option>
+                                    <option value="normal">Нормальное</option>
+                                </select>
+                            </div>
+
+                            <div class="grid grid-cols-2 gap-3 text-[10px] uppercase font-bold text-slate-400 tracking-wide">
+                                <div>
+                                    <span x-text="v.type === 'uniform' ? 'Min' : 'Mean (μ)'"></span>
+                                    <input type="number" step="any" x-model.number="v.p1" 
+                                           class="w-full text-sm font-normal text-slate-700 bg-white border border-slate-200 rounded-lg p-2 mt-1">
+                                </div>
+                                <div>
+                                    <span x-text="v.type === 'uniform' ? 'Max' : 'Std Dev (σ)'"></span>
+                                    <input type="number" step="any" x-model.number="v.p2" 
+                                           class="w-full text-sm font-normal text-slate-700 bg-white border border-slate-200 rounded-lg p-2 mt-1">
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+                    <div x-show="variables.length === 0" class="text-center py-8 text-slate-400 text-sm italic">
+                        Добавьте хотя бы одну переменную
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Правая колонка: формула и результаты -->
+        <div class="lg:col-span-8 space-y-6">
+            <!-- Карточка формулы -->
+            <div class="bg-white/90 backdrop-blur-sm p-5 md:p-6 rounded-2xl shadow-md border border-slate-200/80">
+                <h2 class="text-lg font-bold mb-4 flex items-center gap-2">
+                    <i class="fa-solid fa-square-root-variable text-indigo-500"></i> Формула прибыли
+                </h2>
+                <div class="relative">
+                    <input type="text" x-model="formula" 
+                           class="w-full text-lg md:text-xl font-mono p-4 bg-slate-900 text-indigo-200 rounded-xl focus:ring-4 focus:ring-indigo-200 outline-none shadow-inner"
+                           placeholder="например: (price * conv) - cac">
+                </div>
+                <div class="mt-4 flex flex-wrap items-center gap-2">
+                    <span class="text-xs text-slate-400"><i class="fa-regular fa-circle-info mr-1"></i>Доступны:</span>
+                    <template x-for="v in variables">
+                        <span class="text-[11px] bg-slate-100 text-slate-700 px-2.5 py-1 rounded-full font-mono border border-slate-200" 
+                              x-text="v.name"></span>
+                    </template>
+                    <span x-show="variables.length === 0" class="text-xs text-amber-600">добавьте переменные</span>
+                </div>
+                
+                <button @click="simulate()" 
+                        :disabled="loading || variables.length === 0"
+                        class="mt-6 w-full bg-gradient-to-r from-indigo-600 to-indigo-700 hover:from-indigo-700 hover:to-indigo-800 text-white font-bold py-4 rounded-xl shadow-lg shadow-indigo-200 transition-all active:scale-[0.98] disabled:opacity-50 disabled:shadow-none">
+                    <span x-show="!loading"><i class="fa-solid fa-bolt mr-2"></i> Запустить симуляцию (100k)</span>
+                    <span x-show="loading"><i class="fa-solid fa-spinner fa-spin mr-2"></i> Расчёт...</span>
+                </button>
+            </div>
+
+            <!-- Блок результатов (показывается только после симуляции) -->
+            <div x-show="hasResults" x-transition.opacity.duration.400ms 
+                 class="bg-white/90 backdrop-blur-sm p-5 md:p-7 rounded-2xl shadow-md border border-slate-200/80">
+                <!-- KPI -->
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6 text-center">
+                    <div class="p-4 sm:border-r border-slate-100">
+                        <div class="text-slate-400 text-xs font-bold uppercase tracking-wider mb-1">Медианная прибыль</div>
+                        <div class="text-3xl font-black text-slate-800" x-text="stats.median"></div>
+                    </div>
+                    <div class="p-4 sm:border-r border-slate-100">
+                        <div class="text-slate-400 text-xs font-bold uppercase tracking-wider mb-1">Вероятность убытка</div>
+                        <div class="text-3xl font-black" 
+                             :class="stats.lossProb > 20 ? 'text-rose-500' : 'text-emerald-600'" 
+                             x-text="stats.lossProb + '%'"></div>
+                    </div>
+                    <div class="p-4">
+                        <div class="text-slate-400 text-xs font-bold uppercase tracking-wider mb-1">Средняя прибыль</div>
+                        <div class="text-3xl font-black text-indigo-600" x-text="stats.avgProfit"></div>
+                    </div>
+                </div>
+
+                <!-- Гистограмма -->
+                <div class="relative h-72 w-full mt-2">
+                    <canvas id="profitChart"></canvas>
+                </div>
+
+                <!-- Аналитический блок -->
+                <div class="mt-8 p-5 bg-indigo-50/50 rounded-2xl border border-indigo-100 flex gap-4 items-start">
+                    <div class="bg-white p-3 rounded-xl shadow-sm text-indigo-600">
+                        <i class="fa-solid fa-robot text-xl"></i>
+                    </div>
+                    <div>
+                        <h4 class="font-bold text-slate-800 mb-1">Анализ модели</h4>
+                        <p class="text-slate-600 text-sm leading-relaxed" x-text="aiAnalysis"></p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- Подвал -->
+    <footer class="mt-8 text-center text-slate-400 text-xs">
+        <i class="fa-regular fa-copyright mr-1"></i> Monte Carlo Engine · TensorFlow.js · AST‑парсер
+    </footer>
+</div>
+
+<script>
+    function monteCarloEngine() {
+        return {
+            // Исходные переменные по умолчанию
+            variables: [
+                { name: 'price', type: 'uniform', p1: 3000, p2: 6000 },
+                { name: 'conv',  type: 'normal',  p1: 0.03, p2: 0.005 },
+                { name: 'cac',   type: 'uniform', p1: 80,   p2: 150 }
+            ],
+            formula: '(price * conv) - cac',
+            loading: false,
+            hasResults: false,
+            stats: { median: '—', lossProb: '—', avgProfit: '—' },
+            aiAnalysis: '',
+            chart: null,
+
+            // Добавление новой переменной
+            addVariable() {
+                const newIdx = this.variables.length + 1;
+                this.variables.push({ 
+                    name: `var${newIdx}`, 
+                    type: 'uniform', 
+                    p1: 10, 
+                    p2: 20 
+                });
+            },
+
+            // Удаление переменной
+            removeVariable(index) {
+                if (this.variables.length > 0) {
+                    this.variables.splice(index, 1);
+                }
+            },
+
+            // Основная симуляция
+            async simulate() {
+                if (this.variables.length === 0) {
+                    alert('Добавьте хотя бы одну переменную.');
+                    return;
+                }
+                if (!this.formula.trim()) {
+                    alert('Введите формулу.');
+                    return;
+                }
+
+                this.loading = true;
+                this.hasResults = false;
+                
+                // Небольшая задержка для отрисовки лоадера
+                await new Promise(r => setTimeout(r, 30));
+
+                const sampleSize = 100000;  // 100k итераций
+
+                try {
+                    // Используем tf.tidy для автоматической очистки тензоров
+                    const resultArray = tf.tidy(() => {
+                        // 1. Генерируем тензоры для каждой переменной
+                        const tensors = {};
+                        for (let v of this.variables) {
+                            if (v.type === 'uniform') {
+                                tensors[v.name] = tf.randomUniform([sampleSize], v.p1, v.p2);
+                            } else {
+                                // Нормальное распределение: mean = p1, std = p2
+                                tensors[v.name] = tf.randomNormal([sampleSize], v.p1, v.p2);
+                            }
+                        }
+
+                        // 2. Парсим формулу с помощью expr-eval
+                        const parser = new exprEval.Parser();
+                        // expr-eval по умолчанию разрешает только арифметику, что нам и нужно
+                        const expr = parser.parse(this.formula);
+                        
+                        // Рекурсивно вычисляем AST в TensorFlow
+                        const evaluateNode = (node) => {
+                            if (node.type === 'NumberValue') {
+                                return tf.scalar(node.value);
+                            }
+                            if (node.type === 'VariableValue') {
+                                const tensor = tensors[node.name];
+                                if (!tensor) throw new Error(`Переменная "${node.name}" не найдена`);
+                                return tensor;
+                            }
+                            
+                            const left = evaluateNode(node.left);
+                            const right = evaluateNode(node.right);
+
+                            switch (node.operator) {
+                                case '+': return tf.add(left, right);
+                                case '-': return tf.sub(left, right);
+                                case '*': return tf.mul(left, right);
+                                case '/': return tf.div(left, right);
+                                case '^': return tf.pow(left, right);
+                                default: throw new Error(`Оператор "${node.operator}" не поддерживается`);
+                            }
+                        };
+
+                        const resultTensor = evaluateNode(expr.toNode());
+                        // Синхронно получаем данные (блокирует поток, но 100k элементов — быстро)
+                        return resultTensor.dataSync();
+                    });
+
+                    // Обрабатываем полученный Float32Array
+                    this.processResults(resultArray, sampleSize);
+                    
+                } catch (error) {
+                    console.error(error);
+                    alert(`Ошибка вычислений: ${error.message}`);
+                } finally {
+                    this.loading = false;
+                }
+            },
+
+            // Статистическая обработка и построение графика
+            processResults(data, n) {
+                // Преобразуем в обычный массив для удобства
+                const values = Array.from(data);
+                
+                // Сортировка для медианы и процентилей
+                const sorted = [...values].sort((a, b) => a - b);
+                const median = sorted[Math.floor(n * 0.5)];
+                
+                // Вероятность убытка (значения < 0)
+                const lossCount = values.filter(v => v < 0).length;
+                const lossProb = (lossCount / n) * 100;
+                
+                // Средняя прибыль
+                const sum = values.reduce((acc, v) => acc + v, 0);
+                const avg = sum / n;
+                
+                this.stats = {
+                    median: Math.round(median).toLocaleString('ru-RU'),
+                    lossProb: lossProb.toFixed(1),
+                    avgProfit: Math.round(avg).toLocaleString('ru-RU')
+                };
+
+                // Формируем текстовый анализ
+                if (lossProb > 35) {
+                    this.aiAnalysis = `⚠️ Высокий риск: вероятность убытка ${lossProb.toFixed(1)}%. Медианная прибыль ${this.stats.median}. Рекомендуется пересмотреть волатильность ключевых параметров (например, уменьшить Std Dev или сузить диапазоны).`;
+                } else if (lossProb < 8) {
+                    this.aiAnalysis = `✅ Отличная устойчивость! Вероятность убытка всего ${lossProb.toFixed(1)}%. Бизнес-модель показывает стабильную положительную доходность. Можно рассматривать масштабирование.`;
+                } else {
+                    this.aiAnalysis = `📊 Сбалансированная модель. Вероятность убытка ${lossProb.toFixed(1)}%, медианная прибыль ${this.stats.median}. Рекомендуется дополнительно проанализировать «хвосты» распределения (VaR).`;
+                }
+
+                // Дополнительный нюанс: если средняя прибыль отрицательная, но медиана положительная — асимметрия
+                if (avg < 0 && median > 0) {
+                    this.aiAnalysis += ` Обратите внимание: средняя прибыль отрицательная (${this.stats.avgProfit}), что говорит о редких, но очень больших убытках.`;
+                }
+
+                this.hasResults = true;
+                
+                // Рисуем гистограмму после обновления DOM
+                this.$nextTick(() => {
+                    this.renderChart(sorted, n);
+                });
+            },
+
+            // Отрисовка гистограммы с помощью Chart.js
+            renderChart(sortedData, n) {
+                const canvas = document.getElementById('profitChart');
+                if (!canvas) return;
+                const ctx = canvas.getContext('2d');
+                
+                if (this.chart) {
+                    this.chart.destroy();
+                }
+
+                // Определяем границы: от 1-го до 99-го процентиля, чтобы убрать выбросы
+                const p1 = sortedData[Math.floor(n * 0.01)];
+                const p99 = sortedData[Math.floor(n * 0.99)];
+                const minVal = Math.min(p1, 0); // захватим ноль для наглядности
+                const maxVal = p99;
+                
+                // Если все значения одинаковы — делаем искусственный диапазон
+                let rangeMin = minVal;
+                let rangeMax = maxVal;
+                if (Math.abs(rangeMax - rangeMin) < 1e-9) {
+                    rangeMin -= 1;
+                    rangeMax += 1;
+                }
+                
+                const bins = 35;
+                const step = (rangeMax - rangeMin) / bins;
+                
+                const labels = [];
+                const counts = new Array(bins).fill(0);
+                
+                // Заполняем корзины
+                for (let i = 0; i < n; i++) {
+                    const val = sortedData[i];
+                    if (val < rangeMin || val > rangeMax) continue;
+                    let binIdx = Math.floor((val - rangeMin) / step);
+                    if (binIdx >= bins) binIdx = bins - 1;
+                    counts[binIdx]++;
+                }
+                
+                for (let i = 0; i < bins; i++) {
+                    const binStart = rangeMin + i * step;
+                    labels.push(Math.round(binStart).toLocaleString());
+                }
+
+                // Цвет столбцов: красные для отрицательных, синие для положительных
+                const backgroundColors = labels.map((_, idx) => {
+                    const binCenter = rangeMin + idx * step + step/2;
+                    return binCenter < 0 ? 'rgba(239, 68, 68, 0.6)' : 'rgba(79, 70, 229, 0.6)';
+                });
+                const borderColors = labels.map((_, idx) => {
+                    const binCenter = rangeMin + idx * step + step/2;
+                    return binCenter < 0 ? 'rgba(239, 68, 68, 0.9)' : 'rgba(79, 70, 229, 0.9)';
+                });
+
+                this.chart = new Chart(ctx, {
+                    type: 'bar',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: 'Частота',
+                            data: counts,
+                            backgroundColor: backgroundColors,
+                            borderColor: borderColors,
+                            borderWidth: 1,
+                            borderRadius: 6,
+                            barPercentage: 0.95,
+                            categoryPercentage: 0.95
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: { display: false },
+                            tooltip: {
+                                callbacks: {
+                                    label: (ctx) => `Частота: ${ctx.raw}`
+                                }
+                            }
+                        },
+                        scales: {
+                            x: { 
+                                grid: { display: false },
+                                ticks: { 
+                                    maxRotation: 35, 
+                                    autoSkip: true, 
+                                    maxTicksLimit: 12,
+                                    font: { size: 10 }
+                                },
+                                title: { display: true, text: 'Прибыль (руб.)', font: { weight: 'bold' } }
+                            },
+                            y: { 
+                                display: true,
+                                beginAtZero: true,
+                                grid: { color: '#e2e8f0' },
+                                ticks: { stepSize: Math.ceil(Math.max(...counts) / 8) || 1 }
+                            }
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    // Небольшой стиль для кастомного скролла (опционально)
+    const style = document.createElement('style');
+    style.textContent = `
+        .custom-scroll::-webkit-scrollbar { width: 6px; }
+        .custom-scroll::-webkit-scrollbar-track { background: #f1f5f9; border-radius: 10px; }
+        .custom-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        .custom-scroll::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    `;
+    document.head.appendChild(style);
+</script>
+</body>
+</html>
