@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes">
     <title>Monte Carlo · Unit‑Profit Simulator</title>
     <!-- Font Awesome (иконки) -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
@@ -226,34 +226,46 @@
 
                         // 2. Парсим формулу с помощью expr-eval
                         const parser = new exprEval.Parser();
-                        // expr-eval по умолчанию разрешает только арифметику, что нам и нужно
                         const expr = parser.parse(this.formula);
+                        
+                        // В актуальной версии AST доступен через свойство tree
+                        const ast = expr.tree;
                         
                         // Рекурсивно вычисляем AST в TensorFlow
                         const evaluateNode = (node) => {
-                            if (node.type === 'NumberValue') {
+                            // Узлы могут быть разных типов: 'Literal', 'Variable', 'BinaryExpression', 'UnaryExpression'
+                            if (node.type === 'Literal') {
                                 return tf.scalar(node.value);
                             }
-                            if (node.type === 'VariableValue') {
+                            if (node.type === 'Variable') {
                                 const tensor = tensors[node.name];
                                 if (!tensor) throw new Error(`Переменная "${node.name}" не найдена`);
                                 return tensor;
                             }
-                            
-                            const left = evaluateNode(node.left);
-                            const right = evaluateNode(node.right);
-
-                            switch (node.operator) {
-                                case '+': return tf.add(left, right);
-                                case '-': return tf.sub(left, right);
-                                case '*': return tf.mul(left, right);
-                                case '/': return tf.div(left, right);
-                                case '^': return tf.pow(left, right);
-                                default: throw new Error(`Оператор "${node.operator}" не поддерживается`);
+                            if (node.type === 'BinaryExpression') {
+                                const left = evaluateNode(node.left);
+                                const right = evaluateNode(node.right);
+                                switch (node.operator) {
+                                    case '+': return tf.add(left, right);
+                                    case '-': return tf.sub(left, right);
+                                    case '*': return tf.mul(left, right);
+                                    case '/': return tf.div(left, right);
+                                    case '^': return tf.pow(left, right);
+                                    default: throw new Error(`Оператор "${node.operator}" не поддерживается`);
+                                }
                             }
+                            if (node.type === 'UnaryExpression') {
+                                const arg = evaluateNode(node.argument);
+                                if (node.operator === '-') {
+                                    return tf.neg(arg);
+                                }
+                                // Другие унарные операторы можно добавить при необходимости
+                                throw new Error(`Унарный оператор "${node.operator}" не поддерживается`);
+                            }
+                            throw new Error(`Неизвестный тип узла: ${node.type}`);
                         };
 
-                        const resultTensor = evaluateNode(expr.toNode());
+                        const resultTensor = evaluateNode(ast);
                         // Синхронно получаем данные (блокирует поток, но 100k элементов — быстро)
                         return resultTensor.dataSync();
                     });
@@ -418,7 +430,7 @@
         }
     }
 
-    // Небольшой стиль для кастомного скролла (опционально)
+    // Кастомный скроллбар
     const style = document.createElement('style');
     style.textContent = `
         .custom-scroll::-webkit-scrollbar { width: 6px; }
