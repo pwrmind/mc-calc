@@ -12,10 +12,9 @@
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <!-- TensorFlow.js (вычисления) -->
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
-    <!-- expr-eval (парсер формул) -->
-    <script src="https://cdn.jsdelivr.net/npm/expr-eval@2.0.2/dist/bundle.min.js"></script>
     <!-- Chart.js (визуализация) -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js"></script>
+    <!-- expr-eval больше не используется для вычислений — теперь собственный парсер -->
 </head>
 <body class="bg-slate-50 font-sans text-slate-800 antialiased">
 
@@ -153,7 +152,7 @@
     </div>
     <!-- Подвал -->
     <footer class="mt-8 text-center text-slate-400 text-xs">
-        <i class="fa-regular fa-copyright mr-1"></i> Monte Carlo Engine · TensorFlow.js · AST‑парсер
+        <i class="fa-regular fa-copyright mr-1"></i> Monte Carlo Engine · TensorFlow.js · Надёжный парсер
     </footer>
 </div>
 
@@ -191,6 +190,129 @@
                 }
             },
 
+            // ------------------ Парсер математических выражений (Shunting-yard) ------------------
+            // Преобразует строку формулы в функцию, принимающую объект с тензорами и возвращающую tf.Tensor
+            compileFormula(exprStr, allowedVars) {
+                // Удаляем пробелы
+                const str = exprStr.replace(/\s+/g, '');
+                if (str.length === 0) throw new Error('Пустая формула');
+                
+                // Токенизация: числа, переменные, операторы, скобки
+                const tokens = [];
+                let i = 0;
+                while (i < str.length) {
+                    const ch = str[i];
+                    if (ch === '(' || ch === ')' || ch === '+' || ch === '-' || ch === '*' || ch === '/' || ch === '^') {
+                        tokens.push(ch);
+                        i++;
+                    } else if (/[0-9.]/.test(ch)) {
+                        let num = '';
+                        while (i < str.length && /[0-9.]/.test(str[i])) {
+                            num += str[i];
+                            i++;
+                        }
+                        tokens.push(parseFloat(num));
+                    } else if (/[a-zA-Z_]/.test(ch)) {
+                        let ident = '';
+                        while (i < str.length && /[a-zA-Z0-9_]/.test(str[i])) {
+                            ident += str[i];
+                            i++;
+                        }
+                        if (!allowedVars.includes(ident)) {
+                            throw new Error(`Неизвестная переменная: ${ident}`);
+                        }
+                        tokens.push(ident);
+                    } else {
+                        throw new Error(`Недопустимый символ: ${ch}`);
+                    }
+                }
+
+                // Алгоритм сортировочной станции для получения ОПЗ (RPN)
+                const outputQueue = [];
+                const operatorStack = [];
+                
+                const precedence = { '+': 1, '-': 1, '*': 2, '/': 2, '^': 3 };
+                const associativity = { '+': 'L', '-': 'L', '*': 'L', '/': 'L', '^': 'R' };
+                
+                const isOperator = (t) => ['+', '-', '*', '/', '^'].includes(t);
+                const isNumber = (t) => typeof t === 'number';
+                const isVariable = (t) => typeof t === 'string' && /^[a-zA-Z_]/.test(t);
+                
+                // Обработка унарного минуса: если токен '-' и предыдущий токен отсутствует или является '(' или оператором
+                let prevToken = null;
+                
+                for (let tok of tokens) {
+                    if (isNumber(tok) || isVariable(tok)) {
+                        outputQueue.push(tok);
+                    } else if (tok === '(') {
+                        operatorStack.push(tok);
+                    } else if (tok === ')') {
+                        while (operatorStack.length && operatorStack[operatorStack.length-1] !== '(') {
+                            outputQueue.push(operatorStack.pop());
+                        }
+                        if (operatorStack.length === 0) throw new Error('Несогласованные скобки');
+                        operatorStack.pop(); // убираем '('
+                    } else if (isOperator(tok)) {
+                        // Проверка на унарный минус
+                        if (tok === '-' && (prevToken === null || prevToken === '(' || isOperator(prevToken))) {
+                            // Унарный минус: заменяем на специальный токен 'neg'
+                            tok = 'neg';
+                        }
+                        
+                        const current = tok;
+                        while (operatorStack.length) {
+                            const top = operatorStack[operatorStack.length-1];
+                            if (top === '(') break;
+                            if ((associativity[current] === 'L' && precedence[current] <= precedence[top]) ||
+                                (associativity[current] === 'R' && precedence[current] < precedence[top])) {
+                                outputQueue.push(operatorStack.pop());
+                            } else {
+                                break;
+                            }
+                        }
+                        operatorStack.push(current);
+                    } else {
+                        throw new Error(`Неизвестный токен: ${tok}`);
+                    }
+                    prevToken = tok;
+                }
+                
+                while (operatorStack.length) {
+                    const op = operatorStack.pop();
+                    if (op === '(') throw new Error('Несогласованные скобки');
+                    outputQueue.push(op);
+                }
+
+                // Теперь outputQueue — обратная польская запись.
+                // Создаём функцию, которая будет вычислять её с тензорами.
+                return (tensorMap) => {
+                    const stack = [];
+                    for (let item of outputQueue) {
+                        if (isNumber(item)) {
+                            stack.push(tf.scalar(item));
+                        } else if (isVariable(item)) {
+                            stack.push(tensorMap[item]);
+                        } else if (item === 'neg') {
+                            const a = stack.pop();
+                            stack.push(tf.neg(a));
+                        } else {
+                            const b = stack.pop(); // правый операнд
+                            const a = stack.pop(); // левый операнд
+                            switch (item) {
+                                case '+': stack.push(tf.add(a, b)); break;
+                                case '-': stack.push(tf.sub(a, b)); break;
+                                case '*': stack.push(tf.mul(a, b)); break;
+                                case '/': stack.push(tf.div(a, b)); break;
+                                case '^': stack.push(tf.pow(a, b)); break;
+                                default: throw new Error(`Неизвестный оператор: ${item}`);
+                            }
+                        }
+                    }
+                    if (stack.length !== 1) throw new Error('Ошибка вычисления: некорректное выражение');
+                    return stack[0];
+                };
+            },
+
             // Основная симуляция
             async simulate() {
                 if (this.variables.length === 0) {
@@ -205,72 +327,28 @@
                 this.loading = true;
                 this.hasResults = false;
                 
-                // Небольшая задержка для отрисовки лоадера
                 await new Promise(r => setTimeout(r, 30));
 
-                const sampleSize = 100000;  // 100k итераций
+                const sampleSize = 100000;
 
                 try {
-                    // Используем tf.tidy для автоматической очистки тензоров
+                    const varNames = this.variables.map(v => v.name);
+                    const computeFn = this.compileFormula(this.formula, varNames);
+                    
                     const resultArray = tf.tidy(() => {
-                        // 1. Генерируем тензоры для каждой переменной
+                        // Генерируем тензоры
                         const tensors = {};
                         for (let v of this.variables) {
                             if (v.type === 'uniform') {
                                 tensors[v.name] = tf.randomUniform([sampleSize], v.p1, v.p2);
                             } else {
-                                // Нормальное распределение: mean = p1, std = p2
                                 tensors[v.name] = tf.randomNormal([sampleSize], v.p1, v.p2);
                             }
                         }
-
-                        // 2. Парсим формулу с помощью expr-eval
-                        const parser = new exprEval.Parser();
-                        const expr = parser.parse(this.formula);
-                        
-                        // В актуальной версии AST доступен через свойство tree
-                        const ast = expr.tree;
-                        
-                        // Рекурсивно вычисляем AST в TensorFlow
-                        const evaluateNode = (node) => {
-                            // Узлы могут быть разных типов: 'Literal', 'Variable', 'BinaryExpression', 'UnaryExpression'
-                            if (node.type === 'Literal') {
-                                return tf.scalar(node.value);
-                            }
-                            if (node.type === 'Variable') {
-                                const tensor = tensors[node.name];
-                                if (!tensor) throw new Error(`Переменная "${node.name}" не найдена`);
-                                return tensor;
-                            }
-                            if (node.type === 'BinaryExpression') {
-                                const left = evaluateNode(node.left);
-                                const right = evaluateNode(node.right);
-                                switch (node.operator) {
-                                    case '+': return tf.add(left, right);
-                                    case '-': return tf.sub(left, right);
-                                    case '*': return tf.mul(left, right);
-                                    case '/': return tf.div(left, right);
-                                    case '^': return tf.pow(left, right);
-                                    default: throw new Error(`Оператор "${node.operator}" не поддерживается`);
-                                }
-                            }
-                            if (node.type === 'UnaryExpression') {
-                                const arg = evaluateNode(node.argument);
-                                if (node.operator === '-') {
-                                    return tf.neg(arg);
-                                }
-                                // Другие унарные операторы можно добавить при необходимости
-                                throw new Error(`Унарный оператор "${node.operator}" не поддерживается`);
-                            }
-                            throw new Error(`Неизвестный тип узла: ${node.type}`);
-                        };
-
-                        const resultTensor = evaluateNode(ast);
-                        // Синхронно получаем данные (блокирует поток, но 100k элементов — быстро)
+                        const resultTensor = computeFn(tensors);
                         return resultTensor.dataSync();
                     });
 
-                    // Обрабатываем полученный Float32Array
                     this.processResults(resultArray, sampleSize);
                     
                 } catch (error) {
@@ -283,18 +361,13 @@
 
             // Статистическая обработка и построение графика
             processResults(data, n) {
-                // Преобразуем в обычный массив для удобства
                 const values = Array.from(data);
-                
-                // Сортировка для медианы и процентилей
                 const sorted = [...values].sort((a, b) => a - b);
                 const median = sorted[Math.floor(n * 0.5)];
                 
-                // Вероятность убытка (значения < 0)
                 const lossCount = values.filter(v => v < 0).length;
                 const lossProb = (lossCount / n) * 100;
                 
-                // Средняя прибыль
                 const sum = values.reduce((acc, v) => acc + v, 0);
                 const avg = sum / n;
                 
@@ -304,45 +377,33 @@
                     avgProfit: Math.round(avg).toLocaleString('ru-RU')
                 };
 
-                // Формируем текстовый анализ
                 if (lossProb > 35) {
-                    this.aiAnalysis = `⚠️ Высокий риск: вероятность убытка ${lossProb.toFixed(1)}%. Медианная прибыль ${this.stats.median}. Рекомендуется пересмотреть волатильность ключевых параметров (например, уменьшить Std Dev или сузить диапазоны).`;
+                    this.aiAnalysis = `⚠️ Высокий риск: вероятность убытка ${lossProb.toFixed(1)}%. Медианная прибыль ${this.stats.median}. Рекомендуется пересмотреть волатильность ключевых параметров.`;
                 } else if (lossProb < 8) {
-                    this.aiAnalysis = `✅ Отличная устойчивость! Вероятность убытка всего ${lossProb.toFixed(1)}%. Бизнес-модель показывает стабильную положительную доходность. Можно рассматривать масштабирование.`;
+                    this.aiAnalysis = `✅ Отличная устойчивость! Вероятность убытка всего ${lossProb.toFixed(1)}%. Бизнес-модель показывает стабильную положительную доходность.`;
                 } else {
-                    this.aiAnalysis = `📊 Сбалансированная модель. Вероятность убытка ${lossProb.toFixed(1)}%, медианная прибыль ${this.stats.median}. Рекомендуется дополнительно проанализировать «хвосты» распределения (VaR).`;
+                    this.aiAnalysis = `📊 Сбалансированная модель. Вероятность убытка ${lossProb.toFixed(1)}%, медианная прибыль ${this.stats.median}.`;
                 }
 
-                // Дополнительный нюанс: если средняя прибыль отрицательная, но медиана положительная — асимметрия
                 if (avg < 0 && median > 0) {
                     this.aiAnalysis += ` Обратите внимание: средняя прибыль отрицательная (${this.stats.avgProfit}), что говорит о редких, но очень больших убытках.`;
                 }
 
                 this.hasResults = true;
-                
-                // Рисуем гистограмму после обновления DOM
-                this.$nextTick(() => {
-                    this.renderChart(sorted, n);
-                });
+                this.$nextTick(() => this.renderChart(sorted, n));
             },
 
-            // Отрисовка гистограммы с помощью Chart.js
             renderChart(sortedData, n) {
                 const canvas = document.getElementById('profitChart');
                 if (!canvas) return;
                 const ctx = canvas.getContext('2d');
-                
-                if (this.chart) {
-                    this.chart.destroy();
-                }
+                if (this.chart) this.chart.destroy();
 
-                // Определяем границы: от 1-го до 99-го процентиля, чтобы убрать выбросы
                 const p1 = sortedData[Math.floor(n * 0.01)];
                 const p99 = sortedData[Math.floor(n * 0.99)];
-                const minVal = Math.min(p1, 0); // захватим ноль для наглядности
+                const minVal = Math.min(p1, 0);
                 const maxVal = p99;
                 
-                // Если все значения одинаковы — делаем искусственный диапазон
                 let rangeMin = minVal;
                 let rangeMax = maxVal;
                 if (Math.abs(rangeMax - rangeMin) < 1e-9) {
@@ -352,11 +413,9 @@
                 
                 const bins = 35;
                 const step = (rangeMax - rangeMin) / bins;
-                
                 const labels = [];
                 const counts = new Array(bins).fill(0);
                 
-                // Заполняем корзины
                 for (let i = 0; i < n; i++) {
                     const val = sortedData[i];
                     if (val < rangeMin || val > rangeMax) continue;
@@ -366,11 +425,9 @@
                 }
                 
                 for (let i = 0; i < bins; i++) {
-                    const binStart = rangeMin + i * step;
-                    labels.push(Math.round(binStart).toLocaleString());
+                    labels.push(Math.round(rangeMin + i * step).toLocaleString());
                 }
 
-                // Цвет столбцов: красные для отрицательных, синие для положительных
                 const backgroundColors = labels.map((_, idx) => {
                     const binCenter = rangeMin + idx * step + step/2;
                     return binCenter < 0 ? 'rgba(239, 68, 68, 0.6)' : 'rgba(79, 70, 229, 0.6)';
@@ -398,30 +455,17 @@
                     options: {
                         responsive: true,
                         maintainAspectRatio: false,
-                        plugins: {
-                            legend: { display: false },
-                            tooltip: {
-                                callbacks: {
-                                    label: (ctx) => `Частота: ${ctx.raw}`
-                                }
-                            }
-                        },
+                        plugins: { legend: { display: false } },
                         scales: {
                             x: { 
                                 grid: { display: false },
-                                ticks: { 
-                                    maxRotation: 35, 
-                                    autoSkip: true, 
-                                    maxTicksLimit: 12,
-                                    font: { size: 10 }
-                                },
+                                ticks: { maxRotation: 35, autoSkip: true, maxTicksLimit: 12, font: { size: 10 } },
                                 title: { display: true, text: 'Прибыль (руб.)', font: { weight: 'bold' } }
                             },
                             y: { 
                                 display: true,
                                 beginAtZero: true,
-                                grid: { color: '#e2e8f0' },
-                                ticks: { stepSize: Math.ceil(Math.max(...counts) / 8) || 1 }
+                                grid: { color: '#e2e8f0' }
                             }
                         }
                     }
